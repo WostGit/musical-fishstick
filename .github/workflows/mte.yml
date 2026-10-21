@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+
+  pull_request:
+    branches: ["main"]
+
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: avrea-macos-26-8-vcpu
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Runner hardware
+        run: |
+          echo "=== OS ==="
+          sw_vers
+
+          echo "=== Architecture ==="
+          uname -m
+
+          echo "=== Hardware ==="
+          system_profiler SPHardwareDataType
+
+          echo "=== CPU ==="
+          sysctl -n machdep.cpu.brand_string 2>/dev/null || true
+
+      - name: Probe MTE4 / Memory Tagging support
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          echo "=== MTE / MTE4-related sysctls ==="
+
+          RESULTS="$(
+            sysctl -a 2>/dev/null |
+            grep -Ei \
+              'MTE4|FEAT_MTE|memory.?tag|tagged.?memory|canonical.?tag' \
+            || true
+          )"
+
+          if [ -n "$RESULTS" ]; then
+            echo "$RESULTS"
+          else
+            echo "No MTE/MTE4 capability exposed through macOS sysctl."
+          fi
+
+          echo
+          echo "=== ARM feature sysctls ==="
+
+          sysctl -a 2>/dev/null |
+            grep -Ei 'hw\.optional\.arm|FEAT_' |
+            sort |
+            tee arm-features.txt || true
+
+          echo
+          echo "=== MTE4-specific matches ==="
+
+          if grep -Ei \
+            'MTE4|FEAT_MTE|memory.?tag|canonical.?tag' \
+            arm-features.txt; then
+            echo "MTE/MTE4-related feature found."
+          else
+            echo "No explicit MTE4 feature exposed by macOS."
+          fi
+
+      - name: Compiler MTE feature macros
+        shell: bash
+        run: |
+          echo "=== Clang ==="
+          clang --version
+
+          echo
+          echo "=== ARM/MTE-related predefined macros ==="
+
+          clang -dM -E -x c /dev/null |
+            grep -Ei 'ARM_FEATURE.*MEMORY_TAGGING|MTE' \
+            || echo "No MTE predefined compiler macros enabled by default."
+
+      - name: Build
+        run: |
+          echo "Add build commands here"
+
+      - name: Test
+        run: |
+          echo "Add test commands here"
