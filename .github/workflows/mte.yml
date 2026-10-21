@@ -1,91 +1,148 @@
-name: CI
+name: Avrea MTE4 Test
 
 on:
+  workflow_dispatch:
   push:
     branches: ["main"]
-
   pull_request:
     branches: ["main"]
 
-  workflow_dispatch:
-
 jobs:
-  build:
+  mte4:
+    name: MTE4 on Avrea M5 Max
     runs-on: avrea-macos-26-8-vcpu
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Runner hardware
+      - name: System information
+        shell: bash
         run: |
-          echo "=== OS ==="
+          set -euo pipefail
+
+          echo "=== macOS ==="
           sw_vers
 
+          echo
           echo "=== Architecture ==="
           uname -m
+          uname -a
 
+          echo
           echo "=== Hardware ==="
           system_profiler SPHardwareDataType
 
+          echo
+          echo "=== Model ==="
+          sysctl hw.model || true
+
+          echo
           echo "=== CPU ==="
-          sysctl -n machdep.cpu.brand_string 2>/dev/null || true
+          sysctl machdep.cpu.brand_string 2>/dev/null || true
 
-      - name: Probe MTE4 / Memory Tagging support
-        shell: bash
-        run: |
-          set -uo pipefail
-
-          echo "=== MTE / MTE4-related sysctls ==="
-
-          RESULTS="$(
-            sysctl -a 2>/dev/null |
-            grep -Ei \
-              'MTE4|FEAT_MTE|memory.?tag|tagged.?memory|canonical.?tag' \
+          echo
+          echo "=== Virtualization / hypervisor hints ==="
+          sysctl -a 2>/dev/null \
+            | grep -Ei 'virtual|hypervisor|hv_' \
             || true
-          )"
 
-          if [ -n "$RESULTS" ]; then
-            echo "$RESULTS"
-          else
-            echo "No MTE/MTE4 capability exposed through macOS sysctl."
-          fi
-
-          echo
-          echo "=== ARM feature sysctls ==="
-
-          sysctl -a 2>/dev/null |
-            grep -Ei 'hw\.optional\.arm|FEAT_' |
-            sort |
-            tee arm-features.txt || true
-
-          echo
-          echo "=== MTE4-specific matches ==="
-
-          if grep -Ei \
-            'MTE4|FEAT_MTE|memory.?tag|canonical.?tag' \
-            arm-features.txt; then
-            echo "MTE/MTE4-related feature found."
-          else
-            echo "No explicit MTE4 feature exposed by macOS."
-          fi
-
-      - name: Compiler MTE feature macros
+      - name: Check MTE capabilities
+        id: mte
         shell: bash
         run: |
+          set -euo pipefail
+
+          FEATURES=(
+            FEAT_MTE
+            FEAT_MTE2
+            FEAT_MTE3
+            FEAT_MTE4
+            FEAT_MTE_CANONICAL_TAGS
+            FEAT_MTE_NO_ADDRESS_TAGS
+            FEAT_MTE_STORE_ONLY
+          )
+
+          echo "=== MTE feature status ==="
+
+          for feature in "${FEATURES[@]}"; do
+            key="hw.optional.arm.${feature}"
+            value="$(sysctl -n "$key" 2>/dev/null || echo unavailable)"
+
+            printf "%-45s %s\n" "$key" "$value"
+          done
+
+          echo
+          MTE4="$(sysctl -n hw.optional.arm.FEAT_MTE4 2>/dev/null || echo unavailable)"
+
+          echo "mte4=$MTE4" >> "$GITHUB_OUTPUT"
+
+          if [ "$MTE4" = "1" ]; then
+            echo "MTE4_SUPPORTED=true" >> "$GITHUB_ENV"
+          else
+            echo "MTE4_SUPPORTED=false" >> "$GITHUB_ENV"
+          fi
+
+      - name: Check related MTE4 features
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=== Related MTE4 capabilities ==="
+
+          for feature in \
+            FEAT_MTE_CANONICAL_TAGS \
+            FEAT_MTE_NO_ADDRESS_TAGS \
+            FEAT_MTE_STORE_ONLY
+          do
+            key="hw.optional.arm.${feature}"
+            value="$(sysctl -n "$key" 2>/dev/null || echo unavailable)"
+
+            printf "%-45s %s\n" "$key" "$value"
+          done
+
+      - name: Check Clang target features
+        shell: bash
+        run: |
+          set -euo pipefail
+
           echo "=== Clang ==="
           clang --version
 
           echo
-          echo "=== ARM/MTE-related predefined macros ==="
+          echo "=== Default ARM/MTE macros ==="
 
-          clang -dM -E -x c /dev/null |
-            grep -Ei 'ARM_FEATURE.*MEMORY_TAGGING|MTE' \
-            || echo "No MTE predefined compiler macros enabled by default."
+          clang -dM -E -x c /dev/null \
+            | grep -Ei 'ARM_FEATURE.*MEMORY_TAGGING|MTE' \
+            || echo "No MTE-related predefined macros enabled by default."
 
-      - name: Build
+      - name: Dump ARM feature sysctls
+        shell: bash
         run: |
-          echo "Add build commands here"
+          set -euo pipefail
 
-      - name: Test
+          sysctl -a 2>/dev/null \
+            | grep -E '^hw\.optional\.arm\.' \
+            | sort \
+            | tee arm-features.txt
+
+      - name: Upload ARM feature report
+        uses: actions/upload-artifact@v4
+        with:
+          name: avrea-arm-features
+          path: arm-features.txt
+
+      - name: MTE4 result
+        shell: bash
         run: |
-          echo "Add test commands here"
+          echo "=== Final result ==="
+
+          if [ "${MTE4_SUPPORTED}" = "true" ]; then
+            echo "PASS: FEAT_MTE4 is exposed and enabled."
+          else
+            echo "FAIL: FEAT_MTE4 is not exposed/enabled."
+            echo
+            echo "Avrea value:"
+            sysctl hw.optional.arm.FEAT_MTE4 2>/dev/null || true
+            exit 1
+          fi
